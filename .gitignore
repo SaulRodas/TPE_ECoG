@@ -1,0 +1,16 @@
+# Datos originales (licencia BCI Competition IV) y resultados generados
+data/raw/*
+!data/raw/.gitkeep
+results/
+*.pt
+
+# Python / entornos
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Notebooks
+.ipynb_checkpoints/

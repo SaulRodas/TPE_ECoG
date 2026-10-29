@@ -1,0 +1,119 @@
+# Configuración completa de la fase TPE: fuente única de verdad.
+# data, folds, cleaning, preprocessing y runtime son copia literal de configs/experiment.yaml de las ablaciones
+# (commit 043c44f): el pipeline P0 es el mismo para todos los trials. Cualquier cambio aquí define otro estudio;
+# documentarlo en docs/plan_implementacion_TPE_ECoG.md.
+
+experiment:
+  name: joint_tpe_a5b_a5_best_checkpoint
+  version: "1.0.0"
+
+data:
+  raw_dir: data/raw
+  file_pattern: "sub{n}_comp.mat"
+  fs_ecog: 1000
+  n_samples: 400000                 # 400 s de desarrollo (solo train_data / train_dg)
+  glove_hold_rows: 40               # guante a 25 Hz almacenado con retención de orden cero
+  fingers: [thumb, index, middle, ring, little]
+  subjects:                         # índices de canal base cero, orden del archivo original
+    S1: {file_index: 1, n_channels_raw: 62, excluded: [54], n_channels_used: 61}
+    S2: {file_index: 2, n_channels_raw: 48, excluded: [20, 37], n_channels_used: 46}
+    S3: {file_index: 3, n_channels_raw: 64, excluded: [49], n_channels_used: 63}
+
+folds:
+  names: [B1, B2, B3, B4, B5]       # bloque validado = índice del fold
+  block_seconds: 80
+
+cleaning:
+  clip_k: 25.0                      # límite fijo: mediana ± 25·(1.4826·MAD)
+  mad_scale: 1.4826
+  mad_floor: 1.0e-6                 # mínimo numérico para MAD (unidades de la señal)
+
+preprocessing:                      # P0: CMR sobre la señal cruda limpia (único preprocesamiento de esta fase)
+  std_floor: 1.0e-6
+  bandpass: {l_freq: 40.0, h_freq: 200.0, l_trans_bandwidth: 10.0, h_trans_bandwidth: 20.0, n_taps: 331}
+  notch: {freqs: [60.0, 120.0, 180.0], width_divisor: 200.0, trans_bandwidth_per_side: 2.0, n_taps: 1651}
+  morlet: {n_freqs: 40, f_min: 40.0, f_max: 200.0, n_cycles: 7.0, zero_mean: true}
+  antialias: {pass_hz: 35.0, stop_hz: 50.0, attenuation_db: 60.0, n_taps: 243}
+  fs_features: 100
+  edge_columns: 125                 # contexto de filtrado descartado por extremo de bloque
+  delay_ms: 20                      # ECoG(t) → guante(t + 20 ms) = 2 columnas a 100 Hz
+  purge_columns: 256                # purga en train junto al bloque validado
+  window: 256
+  train_stride: 1
+  val_stride: 64
+  robust_quantile_range: [10.0, 90.0]
+  device: auto                      # auto | cpu | cuda (DSP en float64)
+
+training:                           # Adam + L2 acoplada (no AdamW); lr y weight_decay los propone TPE
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  batch_size: 128
+  drop_last: true
+  loss: {mse_weight: 0.5, cosine_weight: 0.5, cosine_eps: 1.0e-8}
+  seed_base: 42                     # semilla de búsqueda = 42 + 5·sujeto + fold (igual en todos los trials)
+  early_stopping:                   # plan §4: mejor checkpoint según val_pearson_macro (trayectorias reconstruidas)
+    min_delta: 0.0                  # cualquier nuevo máximo estricto cuenta como mejora
+    patience: 10                    # validaciones (una por época) sin nuevo máximo
+    min_epochs: 15                  # la paciencia empieza a contar en la época 16 → primera parada posible: 25
+    max_epochs: 50
+
+runtime:
+  allow_tf32: true                  # tensores float32; convoluciones TF32 en GPUs Ampere+ (como en las ablaciones)
+  deterministic: true
+
+# Bases de las dos familias (k=5, L=5, f=64), idénticas a A5b y A5 de las ablaciones. Para cada trial,
+# space.architecture_spec sustituye anchos, kernels y dilataciones según (kernel_size, encoder_levels, base_filters).
+architectures:
+  A5b:                              # LayerNorm + dropout 0.1 + interpolación + concat antes de conv
+    stem_channels: 64
+    encoder_channels: [64, 128, 256, 512, 512]
+    kernel_sizes: [7, 7, 5, 5, 5]
+    dilations: [1, 2, 3, 1, 2]
+    decoder_channels: [512, 512, 256, 128, 64]
+    decoder_kernel_sizes: [5, 5, 5, 7, 7]
+    normalization: layer
+    dropout: 0.1
+    upsample: interp
+    decoder_order: upsample_concat_conv
+    convtranspose_mode: null
+    skip_position: pre_pool
+  A5:                               # A5b con ConvTranspose1d depthwise en lugar de interpolación
+    stem_channels: 64
+    encoder_channels: [64, 128, 256, 512, 512]
+    kernel_sizes: [7, 7, 5, 5, 5]
+    dilations: [1, 2, 3, 1, 2]
+    decoder_channels: [512, 512, 256, 128, 64]
+    decoder_kernel_sizes: [5, 5, 5, 7, 7]
+    normalization: layer
+    dropout: 0.1
+    upsample: convtranspose
+    decoder_order: upsample_concat_conv
+    convtranspose_mode: depthwise
+    skip_position: pre_pool
+
+search:                             # plan §3.1 y §6: un estudio TPE independiente por sujeto
+  n_trials_per_subject: 32          # trials COMPLETE; los FAIL quedan registrados y no cuentan
+  max_consecutive_failures: 3       # tres FAIL seguidos detienen el proceso (fallo sistemático)
+  max_warmup_attempts: 3            # intentos por warmup antes de darlo por perdido
+  sampler:
+    n_startup_trials: 10
+    multivariate: true
+    constant_liar: false
+    seed_by_subject: {S1: 2026, S2: 2027, S3: 2028}
+  space:                            # el orden es el de sugerencia
+    architecture_id: [A5b, A5]
+    learning_rate: [5.0e-5, 5.0e-4] # logarítmico
+    weight_decay: [1.0e-7, 1.0e-3]  # logarítmico
+    kernel_size: [5, 7]
+    encoder_levels: [4, 5]
+    base_filters: [64, 96]
+  warmups:                          # §6.1: cada par se ejecuta con A5b y con A5 (10 de los 32 trials)
+    - {kernel_size: 5, encoder_levels: 5, base_filters: 64, learning_rate: 8.42e-5, weight_decay: 1.0e-6}  # referencia
+    - {kernel_size: 7, encoder_levels: 5, base_filters: 64, learning_rate: 1.0e-4, weight_decay: 1.0e-5}
+    - {kernel_size: 5, encoder_levels: 4, base_filters: 96, learning_rate: 2.0e-4, weight_decay: 1.0e-6}
+    - {kernel_size: 7, encoder_levels: 4, base_filters: 96, learning_rate: 7.0e-5, weight_decay: 1.0e-4}
+    - {kernel_size: 5, encoder_levels: 5, base_filters: 96, learning_rate: 3.0e-4, weight_decay: 1.0e-7}
+
+verification:                       # plan §7: mejor trial de A5b y de A5 por sujeto, mismos folds, misma política
+  seed_bases: [1042, 2042]          # semilla = base + 5·sujeto + fold
+# No se guardan pesos (como en las ablaciones): cada fold conserva métricas y predictions.npz del mejor checkpoint.
