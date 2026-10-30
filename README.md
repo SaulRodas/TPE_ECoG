@@ -131,5 +131,4 @@ Por eso los reportes se regeneran desde los zip aunque falte algún archivo en D
 Anota aquí cualquier corrección de software, reinicio relevante o trial repetido por ese motivo (fecha, cambio, trials afectados). Los reinicios del sampler también quedan en `tpe_trials.csv` (`session`, `sampler_restored`).
 
 - _(sin incidencias todavía)_
-#   T P E _ E C o G  
- 
+#
