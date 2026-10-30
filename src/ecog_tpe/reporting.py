@@ -1,7 +1,7 @@
 """Tablas (plan §9), simulación retrospectiva (§1.1), comparación con las ablaciones (§10), figuras y monitor.
 
 Los trials se leen del estudio publicado (``results/studies/<S>_study.zip``), no de las carpetas: cada trial guarda en
-sus user_attrs el resumen de sus folds. La verificación se lee de los ``metrics.json`` de sus corridas.
+sus user_attrs el resumen de sus folds. La verificación y el test se leen de los ``metrics.json`` de sus corridas.
 """
 
 from __future__ import annotations
@@ -231,6 +231,68 @@ def selected_models(trials_df: pd.DataFrame, ver: pd.DataFrame, cfg: dict[str, A
     return pd.DataFrame(rows)
 
 
+# ============================================================================ evaluación final en test
+
+
+def final_test_table(results_dir: str | Path, cfg: dict[str, Any]) -> pd.DataFrame:
+    """``tpe_test.csv``: una fila por sujeto × finalista × semilla (también las pendientes)."""
+    fingers, rows = cfg["data"]["fingers"], []
+    for subject in cfg["data"]["subjects"]:
+        base_dir = Path(results_dir) / "final_test" / subject
+        plan = read_json(base_dir / "plan.json")
+        if not plan:
+            continue
+        for arch, info in plan["finalists"].items():
+            for base in plan["seed_bases"]:
+                run_dir = base_dir / arch / f"seed_{base}"
+                status = read_json(run_dir / "status.json") or {}
+                row = {"subject": subject, "architecture_id": arch, "chosen": arch == plan["chosen"],
+                       "source_trial": info["trial"], "label": info["label"], "seed_base": base,
+                       "seed": status.get("seed"), "state": status.get("status", "pending"),
+                       "verification_cv_best": info["verification_cv_best"]}
+                metrics = read_json(run_dir / "metrics.json") if row["state"] == "completed" else None
+                if metrics:
+                    test = metrics["test"]
+                    row.update({
+                        "best_epoch": metrics["best_epoch"], "epochs_trained": metrics["epochs_trained"],
+                        "stop_reason": metrics["stop_reason"], "val_pearson_macro": metrics["best_val_pearson_macro"],
+                        "test_pearson_macro": test["pearson_macro"],
+                        **{f"test_pearson_{f}": test["pearson"].get(f) for f in fingers},
+                        "test_mse_macro": test.get("mse_macro"), "test_ccc_macro": test.get("ccc_macro"),
+                        "train_seconds": metrics["train_seconds"],
+                    })
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def final_test_summary(test: pd.DataFrame) -> pd.DataFrame:
+    """``tpe_test_summary.csv``: media y desviación de las semillas por sujeto × finalista; filas globales por
+    arquitectura y para las elegidas (sujetos con igual peso; ahí la desviación es entre sujetos)."""
+    done = _completed(test)
+    if done.empty:
+        return pd.DataFrame()
+    rows = []
+    for (subject, arch), g in done.groupby(["subject", "architecture_id"], sort=False):
+        rows.append({
+            "subject": subject, "architecture_id": arch, "chosen": bool(g["chosen"].iloc[0]),
+            "label": g["label"].iloc[0], "source_trial": int(g["source_trial"].iloc[0]), "n_seeds": len(g),
+            "test_pearson_mean": g["test_pearson_macro"].mean(), "test_pearson_sd": g["test_pearson_macro"].std(ddof=1),
+            "val_pearson_mean": g["val_pearson_macro"].mean(),
+            "verification_cv_best": float(g["verification_cv_best"].iloc[0]),
+            "mean_best_epoch": g["best_epoch"].mean(), "mean_epochs_trained": g["epochs_trained"].mean(),
+        })
+    summary = pd.DataFrame(rows)
+    groups = [(arch, summary[summary["architecture_id"] == arch]) for arch in summary["architecture_id"].unique()]
+    groups.append(("elegida", summary[summary["chosen"]]))
+    glob = [{"subject": "global", "architecture_id": name, "chosen": name == "elegida", "n_seeds": int(g["n_seeds"].sum()),
+             "test_pearson_mean": g["test_pearson_mean"].mean(),
+             "test_pearson_sd": g["test_pearson_mean"].std(ddof=1) if len(g) > 1 else np.nan,
+             "val_pearson_mean": g["val_pearson_mean"].mean(), "verification_cv_best": g["verification_cv_best"].mean(),
+             "mean_best_epoch": g["mean_best_epoch"].mean(), "mean_epochs_trained": g["mean_epochs_trained"].mean()}
+            for name, g in groups if not g.empty]
+    return pd.concat([summary, pd.DataFrame(glob)], ignore_index=True)
+
+
 # ============================================================================ ablaciones: retrospectiva (§1.1)
 
 
@@ -456,6 +518,70 @@ def plot_reference_curves(reference_dir: str | Path, trials: dict[str, list[Froz
         return _save(fig, path)
 
 
+def plot_test_scores(test: pd.DataFrame, cfg: dict[str, Any], path: Path) -> Path | None:
+    """Pearson de test por semilla (puntos) y media (línea) de A5b y A5 en cada sujeto; × = media de verificación."""
+    done = _completed(test)
+    if done.empty:
+        return None
+    subjects = [s for s in cfg["data"]["subjects"] if s in set(done["subject"])]
+    with plt.rc_context(RC):
+        fig, axes = plt.subplots(1, len(subjects), figsize=(3.6 * len(subjects), 3.6), squeeze=False,
+                                 sharey=True, constrained_layout=True)
+        for ax, subject in zip(axes[0], subjects):
+            ticks, labels, chosen = [], [], None
+            for k, (arch, color) in enumerate(ARCH_COLORS.items()):
+                v = done[(done["subject"] == subject) & (done["architecture_id"] == arch)]
+                if v.empty:
+                    continue
+                values = v["test_pearson_macro"]
+                ax.scatter(np.full(len(values), k) + np.linspace(-0.1, 0.1, len(values)), values, s=22, color=color,
+                           edgecolors=SURFACE, linewidths=0.8, zorder=3, label="test (semilla)" if k == 0 else None)
+                ax.hlines(values.mean(), k - 0.25, k + 0.25, color=color, linewidth=2.0, zorder=4)
+                ax.scatter([k + 0.32], [v["verification_cv_best"].iloc[0]], marker="x", s=30, color=MUTED, zorder=3,
+                           label="verificación (CV)" if k == 0 else None)
+                if v["chosen"].iloc[0]:
+                    chosen = arch
+                ticks.append(k)
+                labels.append(f"{arch}{' ★' if v['chosen'].iloc[0] else ''}\n{v['label'].iloc[0].split(' ', 1)[1]}")
+            ax.set_xticks(ticks, labels)
+            ax.set_xlim(-0.6, len(ARCH_COLORS) - 0.4)
+            ax.grid(axis="x", visible=False)
+            ax.set_title(f"{subject} · elegida {chosen}" if chosen else subject)
+        axes[0, 0].set_ylabel("Pearson macro de test\n(línea = media de semillas)")
+        axes[0, -1].legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), title="★ = elegida por verificación")
+        return _save(fig, path)
+
+
+def plot_test_trajectories(results_dir: str | Path, test: pd.DataFrame, cfg: dict[str, Any], path: Path,
+                           seconds: float = 30.0) -> Path | None:
+    """Guante real frente a predicho en test: modelo elegido de cada sujeto, primera semilla, primeros segundos."""
+    done = _completed(test)
+    done = done[done["chosen"]] if not done.empty else done
+    if done.empty:
+        return None
+    fingers = cfg["data"]["fingers"]
+    runs = [g.sort_values("seed_base").iloc[0] for _, g in done.groupby("subject", sort=False)]
+    with plt.rc_context(RC):
+        fig, axes = plt.subplots(len(fingers), len(runs), figsize=(5.0 * len(runs), 1.5 * len(fingers)),
+                                 squeeze=False, sharex="col", constrained_layout=True)
+        for j, run in enumerate(runs):
+            pred = np.load(Path(results_dir) / "final_test" / run["subject"] / run["architecture_id"]
+                           / f"seed_{run['seed_base']}" / "predictions.npz")
+            t = pred["t_seconds"]
+            keep = t < t[0] + seconds
+            for i, finger in enumerate(fingers):
+                ax = axes[i, j]
+                ax.plot(t[keep], pred["y_true"][i, keep], color=INK, linewidth=1.2, label="real")
+                ax.plot(t[keep], pred["y_pred"][i, keep], color=ARCH_COLORS.get(run["architecture_id"], SLOTS[2]),
+                        linewidth=1.2, label="predicho")
+                r = run.get(f"test_pearson_{finger}")
+                ax.set_ylabel(f"{finger}\nr = {r:.2f}" if pd.notna(r) else f"{finger}\nr = —", fontsize=8)
+            axes[0, j].set_title(f"{run['subject']} · {run['label']} · semilla {run['seed_base']}")
+            axes[-1, j].set_xlabel("tiempo en test (s)")
+        axes[0, -1].legend(loc="upper left", bbox_to_anchor=(1.0, 1.0))
+        return _save(fig, path)
+
+
 # ============================================================================ resumen
 
 
@@ -472,12 +598,14 @@ def write_summary(results_dir: str | Path, cfg: dict[str, Any], reference_dir: s
     selected = selected_models(trials_df, ver, cfg)
     retro_folds, retro_summary = ablation_retrospective(reference_dir, cfg)
     comparison_folds, comparison = comparison_tables(retro_folds, trials, ver, cfg)
+    test = final_test_table(results_dir, cfg)
     tables = {
         "tpe_trials.csv": trials_df, "tpe_folds.csv": folds_df, "tpe_verification.csv": ver,
         "tpe_verification_paired.csv": paired, "tpe_verification_paired_summary.csv": paired_summary,
         "tpe_selected_models.csv": selected, "ablation_retrospective.csv": retro_summary,
         "ablation_retrospective_folds.csv": retro_folds, "tpe_comparison.csv": comparison,
         "tpe_comparison_folds.csv": comparison_folds,
+        "tpe_test.csv": test, "tpe_test_summary.csv": final_test_summary(test),
     }
     for name, table in tables.items():
         table.to_csv(out / name, index=False)
@@ -486,11 +614,13 @@ def write_summary(results_dir: str | Path, cfg: dict[str, Any], reference_dir: s
         "params_vs_objective": plot_params_vs_objective(trials_df, cfg, figures / "params_vs_objective.png"),
         "verification": plot_verification(folds_df, ver, cfg, figures / "verification.png"),
         "reference_curves": plot_reference_curves(reference_dir, trials, cfg, figures / "reference_curves.png"),
+        "test_scores": plot_test_scores(test, cfg, figures / "test_scores.png"),
+        "test_trajectories": plot_test_trajectories(results_dir, test, cfg, figures / "test_trajectories.png"),
     }
     states = trials_df.groupby(["subject", "state"]).size().unstack(fill_value=0).to_dict("index") \
         if not trials_df.empty else {}
     return {"trials": states, "verification_completed": int(len(_completed(ver))),
-            "figures": {k: str(v) for k, v in figs.items() if v}}
+            "test_completed": int(len(_completed(test))), "figures": {k: str(v) for k, v in figs.items() if v}}
 
 
 # ============================================================================ monitoreo (notebook)
@@ -538,7 +668,8 @@ def search_progress(results_dir: str | Path, cfg: dict[str, Any], subjects: list
 
 
 def monitor(results_dir: str | Path, cfg: dict[str, Any], subjects: list[str] | None = None, refresh: int = 60,
-            log_path: str | Path | None = None, max_updates: int | None = None, verification: bool = False) -> None:
+            log_path: str | Path | None = None, max_updates: int | None = None, verification: bool = False,
+            final_test: bool = False) -> None:
     """Panel reejecutable: progreso, ETA, trial y fold en curso, mejores valores y cola del log.
 
     Detenerlo no detiene el entrenamiento.
@@ -557,7 +688,9 @@ def monitor(results_dir: str | Path, cfg: dict[str, Any], subjects: list[str] | 
                 age = _age_seconds(info.get("heartbeat"))
                 print(f"runner {runner.stem}: último latido hace {age:.0f} s · {info.get('current')}"
                       if age is not None else f"runner {runner.stem}")
-            if verification:
+            if final_test:
+                _print_final_test(results_dir, cfg, subjects)
+            elif verification:
                 _print_verification(results_dir, cfg, subjects)
             else:
                 for p in search_progress(results_dir, cfg, subjects):
@@ -600,6 +733,29 @@ def _print_verification(results_dir: Path, cfg: dict[str, Any], subjects: list[s
               " · ".join(f"{a} {m:.4f}" for a, m in means.items()) +
               " · en curso: " + ", ".join(f"{r.architecture_id} s{r.seed_base} {r.fold}"
                                           for r in v[v["state"] == "running"].itertuples()))
+
+
+def _print_final_test(results_dir: Path, cfg: dict[str, Any], subjects: list[str]) -> None:
+    test = final_test_table(results_dir, cfg)
+    for subject in subjects:
+        t = test[test["subject"] == subject] if not test.empty else test
+        if t.empty:
+            print(f"{subject}: test sin empezar")
+            continue
+        done = _completed(t)
+        means = done.groupby("architecture_id")["test_pearson_macro"].mean().to_dict() if not done.empty else {}
+        chosen = t.loc[t["chosen"], "architecture_id"].iloc[0]
+        print(f"{subject}: {len(done)}/{len(t)} corridas · elegida {chosen} · test " +
+              (" · ".join(f"{a} {m:.4f}" for a, m in means.items()) or "—"))
+        for r in t[t["state"] == "running"].itertuples():
+            run_dir = results_dir / "final_test" / subject / r.architecture_id / f"seed_{r.seed_base}"
+            s = read_json(run_dir / "status.json") or {}
+            print(f"  ▶ {r.architecture_id} s{r.seed_base} época {s.get('epoch')}/{s.get('max_epochs')} · "
+                  f"r_val {s.get('last_val_pearson', float('nan')):.4f} · mejor "
+                  f"{s.get('best_val_pearson', float('nan')):.4f} (ép. {s.get('best_epoch')}) · espera {s.get('wait')}")
+            if (run_dir / "history.csv").exists():
+                _plot_live_history(pd.read_csv(run_dir / "history.csv"), f"{subject} test {r.architecture_id} "
+                                                                          f"s{r.seed_base}")
 
 
 def _latest_log(results_dir: Path) -> Path | None:

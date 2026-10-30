@@ -1,6 +1,6 @@
 """Lectura de BCI Competition IV — Dataset 4 y división en bloques cronológicos.
 
-Solo se leen ``train_data`` y ``train_dg``; ``test_data`` y las etiquetas oficiales nunca se cargan.
+Solo se leen ``train_data`` y ``train_dg``; ``test_data`` y las etiquetas oficiales los lee únicamente ``final_test.py``.
 """
 
 from __future__ import annotations

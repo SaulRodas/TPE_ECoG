@@ -2,10 +2,10 @@
 
 **Proyecto:** decodificación continua de la flexión de cinco dedos a partir de ECoG con dos familias de encoder–decoder 1D (A5b y A5) y optimización conjunta de hiperparámetros con TPE.
 **Datos:** BCI Competition IV, dataset 4 (S1, S2, S3).
-**Alcance:** lo implementado en este repositorio: lectura de datos, preprocesamiento, modelo, entrenamiento con early stopping, búsqueda con Optuna TPE, verificación de finalistas y reportes. No incluye evaluación en test ni reentrenamiento final sobre todo el desarrollo.
+**Alcance:** lo implementado en este repositorio: lectura de datos, preprocesamiento, modelo, entrenamiento con early stopping, búsqueda con Optuna TPE, verificación de finalistas, evaluación final en el test oficial (§6.5) y reportes. No incluye reentrenamiento final sobre todo el desarrollo.
 **Relación con otros documentos:** el [plan de implementación](plan_implementacion_TPE_ECoG.md) es la especificación; [`configs/tpe.yaml`](../configs/tpe.yaml) es la única fuente de parámetros; el [README](../README.md) describe el uso.
 
-Todas las decisiones se toman solo con datos de desarrollo. El lector abre únicamente `train_data` y `train_dg`; los datos y etiquetas de test no se cargan en ninguna etapa.
+Todas las decisiones se toman solo con datos de desarrollo. El lector de desarrollo abre únicamente `train_data` y `train_dg`. El test (`test_data` y `test_dg`) solo se lee en la evaluación final (§6.5), después de fijar los finalistas y la elegida.
 
 ---
 
@@ -329,11 +329,24 @@ Las tres semillas (búsqueda + dos de verificación) miden la **estabilidad del 
 2. **Mejor trial TPE** de cada arquitectura.
 3. **Verificación**: media de las dos semillas.
 
+### 6.5. Evaluación final en el test oficial
+
+Es la única etapa que lee `test_data` y `test_dg`, y lo hace una sola vez, después de la verificación. Nada de lo que sale de aquí cambia una decisión: los finalistas, la elegida y todo lo ajustado provienen del desarrollo.
+
+- **Plan congelado.** Antes de abrir el test se escribe `final_test/<S>/plan.json` con los dos finalistas del sujeto (§6.1), su `verification_cv_best` y la elegida (§6.3). Exige la verificación completa del sujeto (2 × 10 corridas); después solo se lee.
+- **Modelos.** Cada finalista se evalúa en su propio sujeto con tres semillas nuevas, `base + 5·sujeto + 4` con bases 3042, 4042 y 5042: 6 entrenamientos por sujeto y 18 en total. Las semillas son las mismas para A5b y A5 dentro de un sujeto, así que la comparación es apareada. No se hacen ensambles: se reportan la media y la desviación estándar de las semillas.
+- **Entrenamiento.** Es el fold B5 de la búsqueda: B1–B4 entrenan (con la purga junto a B5) y B5 solo sirve para el early stopping. La política es la de §4.3, con un **máximo de 70 épocas**; la búsqueda y la verificación siguen con 50. El clip, el RobustScaler y el MinMax se ajustan solo con B1–B4.
+- **Test.** Los 200 s de `test_data` se tratan como un segmento continuo: se excluyen los mismos canales, se aplica el clip de B1–B4, después la CMR y la potencia Morlet sobre el segmento entero, y se escala con los parámetros de B1–B4. Se descartan 125 columnas en cada extremo. Las ventanas se toman con stride 64 en [125, 19875), más la ventana final, y se reconstruye con overlap-add. El objetivo son las columnas [127, 19877), con el retardo de 2 columnas, así que se evalúan 197.5 s. El test se predice **una vez**, en modo `eval`, con el mejor checkpoint según B5; nunca se calcula por época.
+- **Guante de test.** A diferencia de `train_dg`, `test_dg` no viene en escalones de 40 filas: ya está interpolado de forma suave a 1000 Hz. Reconstruirlo con un spline desde cada 40.ª fila lo reproduce con un error < 0.5 % del rango con cualquier fase, así que no hay una rejilla de 25 Hz recuperable. El objetivo a 100 Hz es su valor en el instante de cada columna (`test_dg[::10]`, t = c/100 s), la misma convención que en desarrollo.
+- **Canales dañados en test.** Se aplicó el criterio del EDA (máximo/mediana de la desviación estándar local en ventanas de 1 s). En test están dañados S2-37 (421×), S2-20 (379×) y S3-49 (1661×), todos ya excluidos; S1-54 está normal en test, pero la lista es fija. Entre los canales usados el máximo es 3.6× (S1), 5.6× (S2) y 6.0× (S3), del mismo orden que en desarrollo. Cada ejecución repite el cálculo y lo guarda en `final_test/<S>/test_data.json`.
+- **Pesos.** Estos modelos, y solo estos, guardan `model.pt`: el mejor checkpoint más `spec`, `n_inputs`, `window`, los parámetros y la semilla. Ocupan de 22 a 113 MB según k, L y f. Cada sujeto guarda además `preprocessing.npz` (canales conservados, límites del clip y escaladores de B1–B4). `ecog_tpe.final_test.load_model` reconstruye el modelo.
+- **Resultado principal.** Es la configuración elegida de cada sujeto. También se reportan A5b frente a A5 por sujeto y la media de cada arquitectura sobre los tres sujetos, con igual peso.
+
 ---
 
 ## 7. Comprobaciones
 
-`pytest` ejecuta 55 pruebas; en Colab, con los datos reales, pasaron todas (86.75 s).
+`pytest` ejecuta 60 pruebas. Las 55 anteriores a la evaluación en test pasaron en Colab con los datos reales (86.75 s); las 5 del test pasaron en local.
 
 - **Datos.** Formas tras la exclusión (61 / 46 / 63 canales), bloques de 80 000 muestras, retención del guante alineada a 40 filas y guante interpolado de 5 × 8000 por bloque.
 - **Constantes derivadas.** Decimación 10, 8000 columnas por bloque, región válida [125, 7875) y retardo de 2 columnas.
@@ -354,6 +367,13 @@ Las tres semillas (búsqueda + dos de verificación) miden la **estabilidad del 
   - un trial interrumpido se repite con los mismos parámetros;
   - la verificación y el reporte funcionan de punta a punta;
   - un segundo runner en la misma máquina se rechaza.
+- **Test oficial.**
+  - `load_test` lee las dos variables, con sus formas, y toma el guante en el instante de cada columna.
+  - Alterar el test por completo (×100, desplazamiento y un impulso de 10⁸) deja idénticos bit a bit el clip, los escaladores, los índices de ventanas y las características de B1–B5; las de test sí cambian.
+  - El segmento de test tiene la geometría de §6.5.
+  - La predicción por lotes coincide con la de ventana a ventana.
+  - Los pesos guardados reconstruyen el mismo modelo.
+  - Con un runner simulado: el plan exige la verificación completa y queda congelado; se ejecutan 6 corridas con máximo 70 y las semillas esperadas; al reanudar no se repite nada; y el reporte genera sus tablas y figuras.
 
 Antes de la campaña, un *smoke* recorre la cadena completa con datos reales (S1, fold B1, los dos warmups del par 1, 2 épocas × 2 batches) en una carpeta separada.
 
@@ -390,6 +410,9 @@ results/
 ├── trials/<S>/trial_NNN/           config.json, trial.json (estado y valor), error.txt si falló
 │   └── <fold>/                     status.json, history.csv, metrics.json, predictions.npz
 ├── verification/<S>/               finalists.json; <A5b|A5>/seed_<base>/<fold>/ (mismos archivos)
+├── final_test/<S>/                 plan.json, test_data.json, preprocessing.npz;
+│   └── <A5b|A5>/seed_<base>/       config.json, status.json, history.csv, metrics.json (B5 y test),
+│                                   predictions.npz (test) y model.pt
 ├── capacity/                       capacity_<gpu>.csv
 ├── runners/  logs/                 latido del runner y logs del proceso en segundo plano
 └── summary/                        tablas y figuras de report_tpe.py
@@ -405,7 +428,9 @@ Cada trial guarda en sus `user_attrs` el resumen de sus folds: semilla, mejor é
 | `tpe_verification_paired*.csv` | Diferencias A5 − A5b emparejadas y su resumen (§6.3) |
 | `tpe_selected_models.csv` | Configuración elegida por sujeto, objetivo de búsqueda, media y DE de verificación y mediana de la mejor época |
 | `tpe_comparison*.csv` | Comparación interna (§6.4) por sujeto, dedo y fold |
-| `figures/` | Historia de la optimización (`optimization_history.png`), hiperparámetros frente al objetivo (`params_vs_objective.png`) y búsqueda frente a verificación (`verification.png`) |
+| `tpe_test.csv` | Una fila por sujeto × finalista × semilla de test: elegida o no, mejor época, épocas, motivo de parada, Pearson de B5 y de test (macro y por dedo), MSE y CCC |
+| `tpe_test_summary.csv` | Media ± DE de las semillas por sujeto y finalista, con B5 y verificación; filas globales por arquitectura y para las elegidas (media y DE entre sujetos) |
+| `figures/` | Historia de la optimización (`optimization_history.png`), hiperparámetros frente al objetivo (`params_vs_objective.png`), búsqueda frente a verificación (`verification.png`), test por semilla (`test_scores.png`) y trayectorias de test de la elegida (`test_trajectories.png`) |
 
 `report_tpe.py` puede ejecutarse a mitad de campaña: reporta lo que haya.
 
@@ -414,16 +439,18 @@ Cada trial guarda en sus `user_attrs` el resumen de sus folds: semilla, mejor é
 ## 10. Limitaciones metodológicas
 
 1. **Optimismo de selección.** El objetivo toma el máximo de validación de cada fold y luego se elige el mejor de 32 trials en los mismos folds. J_s es una métrica de selección, no una estimación de rendimiento en datos nuevos (Cawley y Talbot, 2010).
-2. **Verificación en los mismos folds.** Las semillas nuevas miden estabilidad del entrenamiento, no generalización. No hay evaluación independiente en test.
+2. **Verificación en los mismos folds.** Las semillas nuevas miden estabilidad del entrenamiento, no generalización. La evaluación independiente es la del test oficial (§6.5).
 3. **Comparador interno sesgado.** El warmup de referencia es uno de los 32 trials, así que el mejor trial de su arquitectura es, por construcción, mayor o igual que él. La diferencia es descriptiva.
 4. **Sin control de búsqueda aleatoria.** Sin un Random Search con el mismo presupuesto no se puede atribuir ventaja a TPE frente a otros buscadores.
 5. **Semillas fijas por fold.** Emparejan las comparaciones entre trials, pero el objetivo puede ajustarse a esas semillas concretas; la verificación con semillas nuevas lo acota.
 6. **Early stopping.** Con `min_delta = 0`, cualquier mejora mínima, incluso por ruido, reinicia la paciencia. Las configuraciones lentas pueden no converger en 50 épocas.
-7. **Exclusión de canales.** La lista es fija y no se decide dentro de cada fold: no es un criterio anidado.
+7. **Exclusión de canales.** La lista es fija y no se decide dentro de cada fold: no es un criterio anidado. La exclusión de S3-49 viene de las ablaciones, que la decidieron a partir de una evaluación histórica del test, así que el test no es del todo ciego respecto a ese canal.
 8. **Retardo fijo de 20 ms.** No se ajusta ni se prueban otros valores.
 9. **Causalidad.** Los filtros de fase cero, las wavelets y el modelo usan contexto futuro, y el entrenamiento incluye bloques posteriores al validado. La validación por bloques con purga no equivale a predicción causal en tiempo real.
 10. **No determinismo de la GPU.** La reproducibilidad es estadística, no bit a bit (§4.5).
-11. **Sin pesos guardados.** Reproducir una inferencia exige reentrenar; el reentrenamiento final con todo el desarrollo no está implementado.
+11. **Pesos.** La búsqueda y la verificación no guardan pesos; solo los 18 modelos de test (§6.5). El reentrenamiento final con todo el desarrollo no está implementado: los modelos de test entrenan con B1–B4 porque B5 hace falta para el early stopping.
+12. **Guante de test.** La fase de la interpolación con la que se distribuyó `test_dg` es desconocida; el objetivo de test puede estar desplazado hasta ≈ 20 ms respecto a la convención de desarrollo.
+13. **Un solo test.** Con 200 s por sujeto y tres sujetos, las diferencias pequeñas entre A5b y A5 en test tienen poca potencia; la desviación entre semillas no cubre la variabilidad del registro.
 
 ---
 

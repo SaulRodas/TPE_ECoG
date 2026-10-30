@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Genera results/summary/ (CSV y figuras) a partir de los estudios publicados y de la verificación.
+"""Genera results/summary/ (CSV y figuras) a partir de los estudios publicados, la verificación y el test.
 
 Se puede ejecutar en cualquier momento: con la campaña a medias reporta lo que haya. La simulación retrospectiva
 sobre las ablaciones (reference/ablaciones) no necesita ningún resultado de TPE.
@@ -61,6 +61,12 @@ def main() -> int:
     if not selected.empty:
         print("\nModelo elegido por sujeto (media de las dos semillas de verificación):")
         print(selected.round(6).to_string(index=False))
+    test = _read(summary / "tpe_test_summary.csv")
+    if not test.empty:
+        print("\nTest oficial (media ± sd de las semillas; en 'global', media y sd entre sujetos):")
+        cols = ["subject", "architecture_id", "chosen", "label", "n_seeds", "test_pearson_mean", "test_pearson_sd",
+                "val_pearson_mean", "verification_cv_best", "mean_best_epoch"]
+        print(test[cols].round(4).to_string(index=False))
     return 0
 
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Búsqueda TPE por sujeto, verificación de finalistas y comprobaciones previas (capacidad y smoke).
+"""Búsqueda TPE por sujeto, verificación de finalistas, evaluación final en test y comprobaciones previas
+(capacidad y smoke).
 
 Ejemplos:
     python scripts/run_tpe.py --capacity                  # 16 combinaciones en la GPU (plan §3.2)
@@ -7,6 +8,7 @@ Ejemplos:
     python scripts/run_tpe.py --subjects S1               # estudio de S1 hasta 32 trials COMPLETE (reanudable)
     python scripts/run_tpe.py --subjects S1 S2 S3         # varios sujetos, uno detrás de otro
     python scripts/run_tpe.py --subjects S1 --verify      # finalistas A5b/A5 × 2 semillas × 5 folds (reanudable)
+    python scripts/run_tpe.py --subjects S1 --test --test-labels-dir RUTA   # finalistas × 3 semillas en el test oficial
 """
 
 import os
@@ -40,6 +42,10 @@ def main() -> int:
     parser.add_argument("--subjects", nargs="+")
     parser.add_argument("--trials", type=int, default=None, help="trials COMPLETE por sujeto (por defecto, la config)")
     parser.add_argument("--verify", action="store_true", help="verificación de finalistas en lugar de búsqueda")
+    parser.add_argument("--test", action="store_true",
+                        help="evaluación final en el test oficial (requiere la verificación completa del sujeto)")
+    parser.add_argument("--test-labels-dir", default=None,
+                        help="carpeta con sub{1,2,3}_testlabels.mat (por defecto, la de --data-dir)")
     parser.add_argument("--capacity", action="store_true", help="solo la comprobación de memoria/tiempo en la GPU")
     parser.add_argument("--smoke", action="store_true", help="cadena completa mínima en <results>/_smoke")
     parser.add_argument("--device", default=None, help="auto | cpu | cuda")
@@ -79,7 +85,13 @@ def main() -> int:
             return 0
         if not subjects:
             parser.error("indica --subjects (o usa --capacity / --smoke)")
-        if args.verify:
+        if args.test:
+            from ecog_tpe.final_test import run_final_test
+
+            labels_dir = Path(args.test_labels_dir) if args.test_labels_dir else data_dir
+            for subject in subjects:
+                run_final_test(cfg, subject, data_dir, labels_dir, results_dir, args.device)
+        elif args.verify:
             from ecog_tpe.verification import run_verification
 
             for subject in subjects:

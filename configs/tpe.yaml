@@ -117,3 +117,11 @@ search:                             # plan §3.1 y §6: un estudio TPE independi
 verification:                       # plan §7: mejor trial de A5b y de A5 por sujeto, mismos folds, misma política
   seed_bases: [1042, 2042]          # semilla = base + 5·sujeto + fold
 # No se guardan pesos (como en las ablaciones): cada fold conserva métricas y predictions.npz del mejor checkpoint.
+
+final_test:                         # evaluación final: los dos finalistas por sujeto, una sola pasada por el test oficial
+  test_labels_pattern: "sub{n}_testlabels.mat"   # variable test_dg; test_data sale de sub{n}_comp.mat
+  n_samples: 200000                 # 200 s de test por sujeto
+  validation_fold: B5               # entrena con B1–B4 y para con B5 (como el fold B5 de la búsqueda)
+  max_epochs: 70                    # solo aquí; búsqueda y verificación siguen con 50
+  seed_bases: [3042, 4042, 5042]    # semilla = base + 5·sujeto + índice del fold de validación
+# Estos modelos sí guardan sus pesos (model.pt del mejor checkpoint) y el preprocesamiento para reutilizarlos.

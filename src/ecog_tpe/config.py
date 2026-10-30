@@ -138,9 +138,14 @@ def _validate_search(cfg: dict[str, Any]) -> None:
     es = cfg["training"]["early_stopping"]
     if not (1 <= es["patience"] and 0 <= es["min_epochs"] < es["max_epochs"] and es["min_delta"] >= 0):
         raise ValueError("training.early_stopping: se espera patience ≥ 1, 0 ≤ min_epochs < max_epochs y min_delta ≥ 0")
-    bases = [cfg["training"]["seed_base"], *cfg["verification"]["seed_bases"]]
+    final = cfg["final_test"]
+    bases = [cfg["training"]["seed_base"], *cfg["verification"]["seed_bases"], *final["seed_bases"]]
     if len(set(bases)) != len(bases):
-        raise ValueError("las semillas base de búsqueda y verificación deben ser distintas")
+        raise ValueError("las semillas base de búsqueda, verificación y test deben ser distintas")
+    if final["validation_fold"] not in cfg["folds"]["names"]:
+        raise ValueError(f"final_test.validation_fold={final['validation_fold']!r} no es un fold")
+    if final["max_epochs"] <= es["min_epochs"]:
+        raise ValueError("final_test.max_epochs debe superar training.early_stopping.min_epochs")
 
 
 def validate_config(cfg: dict[str, Any]) -> None:
