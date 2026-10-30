@@ -18,7 +18,8 @@ La especificación completa es [docs/plan_implementacion_TPE_ECoG.md](docs/plan_
 | TPE guiado | 22 trials × 5 folds | 330 |
 | Verificación (mejor A5b y mejor A5 × semillas 1042/2042) | 2 × 2 × 5 | 60 |
 | Test oficial (mismos finalistas × semillas 3042/4042/5042; B1–B4, parada con B5, máx. 70) | 2 × 3 | 18 |
-| **Total** | | **558** |
+| Test oficial con B1–B5 (mismos modelos y semillas; épocas fijas = mediana de verificación) | 2 × 3 | 18 |
+| **Total** | | **576** |
 
 **Entrenamiento:**
 - Adam + L2 acoplada (no AdamW), batch 128, pérdida `0.5·MSE + 0.5·(1 − coseno)`.
@@ -30,9 +31,9 @@ La especificación completa es [docs/plan_implementacion_TPE_ECoG.md](docs/plan_
 
 **Sampler:** `TPESampler(multivariate=True, n_startup_trials=10, constant_liar=False)`, semillas 2026/2027/2028, `NopPruner`, ejecución secuencial.
 
-**Pesos:** la búsqueda y la verificación no los guardan (como en las ablaciones); cada fold conserva métricas y `predictions.npz` de su mejor checkpoint. Solo los 18 modelos de test guardan `model.pt` (más `preprocessing.npz` por sujeto); `ecog_tpe.final_test.load_model` los reconstruye.
+**Pesos:** la búsqueda y la verificación no los guardan (como en las ablaciones); cada fold conserva métricas y `predictions.npz` de su mejor checkpoint. Solo los 36 modelos de test guardan `model.pt` (más `preprocessing.npz` por sujeto); `ecog_tpe.final_test.load_model` los reconstruye.
 
-**Test oficial:** se lee una sola vez, después de la verificación, con los finalistas y la elegida ya fijados en `final_test/<S>/plan.json`. `test_data` sale de `sub{n}_comp.mat` y `test_dg` de `sub{n}_testlabels.mat` (carpeta de `--test-labels-dir`). Detalles en [docs/metodologia.md](docs/metodologia.md) §6.5.
+**Test oficial:** se lee una sola vez, después de la verificación, con los finalistas y la elegida ya fijados en `final_test/<S>/plan.json`. `test_data` sale de `sub{n}_comp.mat` y `test_dg` de `sub{n}_testlabels.mat` (carpeta de `--test-labels-dir`). Hay dos protocolos: B1–B4 con parada en B5 (`final_test/`) y B1–B5 con épocas fijas (`final_test_full/`), comparados de forma apareada en `tpe_test_protocols.csv`. Detalles en [docs/metodologia.md](docs/metodologia.md) §6.5–6.6.
 
 ## Uso local
 
@@ -45,6 +46,7 @@ python scripts/run_tpe.py --smoke                     # S1/B1, 2 trials × 2 ép
 python scripts/run_tpe.py --subjects S1 S2 S3         # búsqueda: 32 trials COMPLETE por sujeto (reanudable)
 python scripts/run_tpe.py --subjects S1 S2 S3 --verify   # verificación de finalistas (reanudable)
 python scripts/run_tpe.py --subjects S1 S2 S3 --test --test-labels-dir RUTA   # test oficial (reanudable)
+python scripts/run_tpe.py --subjects S1 S2 S3 --test-full --test-labels-dir RUTA   # test con B1–B5 (reanudable)
 python scripts/report_tpe.py                          # tablas y figuras → results/summary/
 ```
 
@@ -70,7 +72,8 @@ El notebook [scripts/colab_tpe.ipynb](scripts/colab_tpe.ipynb) sigue el mismo es
    5. monitor;
    6. verificación;
    7. reporte;
-   8. test oficial, con las etiquetas subidas a `Mi unidad/TPE_ECoG/test_labels/` (`TEST_LABELS_DIR`).
+   8. test oficial, con las etiquetas subidas a `Mi unidad/TPE_ECoG/test_labels/` (`TEST_LABELS_DIR`);
+   9. test con B1–B5.
 3. **Paralelizar:** un runtime de Colab por sujeto (`SUBJECTS = ["S2"]`, etc.) sobre el mismo `RESULTS_DIR`. Nunca dos procesos sobre el mismo sujeto. Usa la misma clase de GPU en toda la campaña.
 
 Reanudación:
@@ -97,11 +100,12 @@ results/
 ├── verification/<S>/               finalists.json; <A5b|A5>/seed_<base>/<fold>/ (mismos archivos)
 ├── final_test/<S>/                 plan.json, test_data.json, preprocessing.npz;
 │   └── <A5b|A5>/seed_<base>/       metrics.json (B5 y test), predictions.npz (test), model.pt, history.csv
+├── final_test_full/<S>/            lo mismo para el test con B1–B5 (plan.json con las épocas fijas)
 ├── capacity/                       capacity_<gpu>.csv
 ├── runners/  logs/                 latido del runner y logs del proceso en segundo plano
 └── summary/                        tpe_trials.csv, tpe_folds.csv, tpe_verification.csv (+ _paired),
                                     tpe_selected_models.csv, ablation_retrospective*.csv,
-                                    tpe_comparison*.csv, tpe_test.csv, tpe_test_summary.csv, figures/
+                                    tpe_comparison*.csv, tpe_test*.csv (+ _summary, _protocols), figures/
 ```
 
 Cada trial guarda en el estudio (user_attrs) el resumen de sus folds:
@@ -117,12 +121,12 @@ Por eso los reportes se regeneran desde los zip aunque falte algún archivo en D
 |---|---|
 | `src/ecog_tpe/data.py`, `cleaning.py`, `preprocessing.py`, `evaluation.py`, `models.py` | **copia literal** de `ecog_ablations` (P0, A5b/A5, overlap-add, métricas) |
 | `src/ecog_tpe/config.py` | carga y validación de `configs/tpe.yaml`, semillas |
-| `src/ecog_tpe/training.py` | Adam + L2, pérdida y determinismo (copiados); `EarlyStopping`, `simulate`, `train_fold` |
+| `src/ecog_tpe/training.py` | Adam + L2, pérdida y determinismo (copiados); `EarlyStopping`, `simulate`, `train_fold`, `train_fixed_epochs` |
 | `src/ecog_tpe/space.py` | espacio de búsqueda, warmups y `architecture_spec(k, L, f)` |
 | `src/ecog_tpe/runs.py` | caché P0 por sujeto, `run_fold` y artefactos, lock del runner |
 | `src/ecog_tpe/search.py` | estudio Optuna (zip, warmups, objetivo, bucle), capacidad, smoke |
 | `src/ecog_tpe/verification.py` | finalistas y su reentrenamiento con dos semillas |
-| `src/ecog_tpe/final_test.py` | test oficial: plan congelado, fold B5 + segmento de test, una predicción por modelo, pesos |
+| `src/ecog_tpe/final_test.py` | test oficial (B1–B4 + parada en B5, y B1–B5 con épocas fijas): planes congelados, segmento de test, una predicción por modelo, pesos |
 | `src/ecog_tpe/reporting.py` | tablas, retrospectiva, comparación con ablaciones, figuras y monitor |
 
 ## Límites de interpretación

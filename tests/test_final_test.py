@@ -1,4 +1,5 @@
-"""Evaluación final en test: lectura del test, ausencia de fugas, geometría, plan congelado, flujo y pesos."""
+"""Evaluación final en test (B1–B4 + parada en B5, y B1–B5 con épocas fijas): lectura del test, ausencia de fugas,
+geometría, entrenamiento sin validación, planes congelados, flujo, comparación de protocolos y pesos."""
 
 from __future__ import annotations
 
@@ -10,11 +11,12 @@ import pytest
 import torch
 from scipy.io import savemat
 
-from ecog_tpe import final_test
+from ecog_tpe import final_test, training
 from ecog_tpe.config import REPO_ROOT, load_config
 from ecog_tpe.evaluation import overlap_add
 from ecog_tpe.final_test import (
     SubjectTestData,
+    freeze_full_plan,
     freeze_plan,
     load_model,
     load_test,
@@ -29,7 +31,7 @@ from ecog_tpe.runs import write_json
 from ecog_tpe.verification import run_verification
 from test_pipeline import synthetic_recording
 from test_search import FakeData, FakeRunner, search
-from test_training import TINY
+from test_training import TCFG, TINY, tiny_features
 
 CPU = torch.device("cpu")
 
@@ -105,6 +107,62 @@ def test_test_data_never_changes_what_is_fitted(small_cfg, monkeypatch):
     assert seg.t_seconds[0] == pytest.approx(1.27) and len(seg.t_seconds) == 19750
 
 
+def test_full_development_trains_on_every_block(small_cfg, monkeypatch):
+    dev_ecog, dev_dg = synthetic_recording(small_cfg, n_channels=3)
+    test_ecog, test_dg = synthetic_test(small_cfg)
+    monkeypatch.setattr(final_test, "load_subject", lambda *a: {"ecog": dev_ecog, "dg": dev_dg})
+
+    def build(ecog, full=True):
+        monkeypatch.setattr(final_test, "load_test",
+                            lambda *a: {"ecog": ecog, "glove": np.ascontiguousarray(test_dg[::10].T)})
+        return SubjectTestData(small_cfg, "dev", "labels", "S1", CPU, full=full)
+
+    data = build(test_ecog)
+    altered = test_ecog * 100 + 1e4
+    altered[100000, :] = 1e8
+    data2 = build(altered)
+
+    # Los cinco bloques entrenan con la región válida completa (sin purga) y no hay validación.
+    assert data.fold is None and data.feats.val_block is None
+    index, w = data.feats.train_index, small_cfg["preprocessing"]["window"]
+    assert set(index[:, 0]) == {0, 1, 2, 3, 4} and len(index) == 5 * (7750 - w + 1)
+    for b in range(5):
+        starts = index[index[:, 0] == b, 1]
+        assert starts.min() == 125 and starts.max() + w == 7875
+    assert data.info["train_blocks"] == small_cfg["folds"]["names"] and data.info["validation_fold"] is None
+
+    # El test no cambia nada de lo ajustado con B1–B5.
+    for key, value in data.preprocessing.items():
+        np.testing.assert_array_equal(value, data2.preprocessing[key])
+    np.testing.assert_array_equal(data.feats.X, data2.feats.X)
+    assert not np.array_equal(data.test.X, data2.test.X)
+
+    # Clip y escaladores incluyen B5: difieren de los del primer protocolo (solo B1–B4).
+    es = build(test_ecog, full=False)
+    assert not np.array_equal(data.preprocessing["clip_median"], es.preprocessing["clip_median"])
+    assert not np.array_equal(data.preprocessing["x_center"], es.preprocessing["x_center"])
+
+
+def test_train_fixed_epochs_runs_exactly_the_given_epochs(monkeypatch):
+    def train(seed):
+        torch.manual_seed(0)
+        model = EncoderDecoder1D(6, TINY, n_outputs=5, window=256)
+        rows, _ = training.train_fixed_epochs(model, tiny_features(), TCFG, 3, CPU, seed)
+        return model, rows
+
+    model, rows = train(5)
+    assert [r["epoch"] for r in rows] == [1, 2, 3] and "val_pearson_macro" not in rows[0]
+    again, _ = train(5)
+    for a, b in zip(model.state_dict().values(), again.state_dict().values()):
+        torch.testing.assert_close(a, b)  # misma semilla, mismo orden de lotes y mismos pesos
+
+    monkeypatch.setattr(training, "mse_cosine_loss", lambda pred, target, lcfg: (pred.sum() * float("nan"),) * 3)
+    seen = []
+    with pytest.raises(FloatingPointError):
+        training.train_fixed_epochs(model, tiny_features(), TCFG, 3, CPU, 5, on_epoch=seen.append)
+    assert len(seen) == 1  # la época se registra antes del error
+
+
 def test_predict_segment_matches_window_by_window():
     torch.manual_seed(0)
     model = EncoderDecoder1D(6, TINY, n_outputs=5, window=256)
@@ -137,10 +195,11 @@ class FakeTestRunner:
         self.calls = []
 
     def __call__(self, data, spec, params, seed, cfg, device, out_dir, stopper, tag="", max_batches=None,
-                 on_epoch=None):
-        self.calls.append((params["architecture_id"], seed, stopper.max_epochs))
+                 on_epoch=None, epochs=None):
+        self.calls.append((params["architecture_id"], seed, stopper.max_epochs if stopper else None, epochs))
         fingers = cfg["data"]["fingers"]
-        score = 0.5 + 0.05 * (params["architecture_id"] == "A5") + 0.001 * (seed % 7)
+        score = (0.5 + 0.05 * (params["architecture_id"] == "A5") + 0.001 * (seed % 7)
+                 + 0.01 * (stopper is None))  # B1–B5 (épocas fijas) da +0.01 en todas las semillas
         t = np.arange(4000) / 100
         y = np.stack([np.sin(t + k) for k in range(5)])
         np.savez_compressed(out_dir / "predictions.npz", y_true=y, y_pred=0.9 * y, t_seconds=t,
@@ -173,19 +232,39 @@ def test_plan_runs_and_report(cfg, tmp_path):
     plan = run_final_test(small, "S1", "sin_datos", "sin_etiquetas", results, device="cpu", data=FakeData(),
                           runner=runner)
     assert plan["chosen"] == "A5" and set(plan["finalists"]) == {"A5b", "A5"}  # la superficie falsa favorece A5
-    assert len(runner.calls) == 2 * 3 and {m for _, _, m in runner.calls} == {70}
-    assert sorted({s for _, s, _ in runner.calls}) == [3046, 4046, 5046]  # base + 5·0 + índice de B5
+    assert len(runner.calls) == 2 * 3 and {(m, e) for _, _, m, e in runner.calls} == {(70, None)}
+    assert sorted({s for _, s, _, _ in runner.calls}) == [3046, 4046, 5046]  # base + 5·0 + índice de B5
     assert freeze_plan(results, "S1", small)["frozen_at"] == plan["frozen_at"]  # congelado
 
     again = FakeTestRunner()  # reanudar no repite corridas completadas
     run_final_test(small, "S1", "sin_datos", "sin_etiquetas", results, device="cpu", data=FakeData(), runner=again)
     assert again.calls == []
 
+    # Segundo protocolo: B1–B5, épocas fijas = mediana de las 10 best_epoch de verificación (3 en el runner falso).
+    full_runner = FakeTestRunner()
+    full_plan = run_final_test(small, "S1", "sin_datos", "sin_etiquetas", results, device="cpu", data=FakeData(),
+                               runner=full_runner, full=True)
+    assert full_plan["chosen"] == plan["chosen"] and full_plan["base_plan_frozen_at"] == plan["frozen_at"]
+    assert all(f["epochs"] == 3 and f["verification_best_epochs"] == [3] * 10 for f in full_plan["finalists"].values())
+    assert {(m, e) for _, _, m, e in full_runner.calls} == {(None, 3)} and len(full_runner.calls) == 6
+    assert sorted({s for _, s, _, _ in full_runner.calls}) == [3046, 4046, 5046]  # mismas semillas que B1–B4
+    assert (results / "final_test_full" / "S1" / "A5" / "seed_3042" / "metrics.json").exists()
+    assert freeze_full_plan(results, "S1", small)["frozen_at"] == full_plan["frozen_at"]  # congelado
+    again = FakeTestRunner()
+    run_final_test(small, "S1", "sin_datos", "sin_etiquetas", results, device="cpu", data=FakeData(), runner=again,
+                   full=True)
+    assert again.calls == []
+
     info = write_summary(results, small, REPO_ROOT / "reference" / "ablaciones")
-    assert info["test_completed"] == 6 and {"test_scores", "test_trajectories"} <= set(info["figures"])
+    assert info["test_completed"] == 12 and {"test_scores", "test_trajectories"} <= set(info["figures"])
     summary = pd.read_csv(results / "summary" / "tpe_test_summary.csv")
-    s1 = summary[summary["subject"] == "S1"].set_index("architecture_id")
-    assert s1.loc["A5", "chosen"] and not s1.loc["A5b", "chosen"] and (s1["n_seeds"] == 3).all()
-    elegida = summary[(summary["subject"] == "global") & (summary["architecture_id"] == "elegida")].iloc[0]
-    assert elegida["test_pearson_mean"] == pytest.approx(s1.loc["A5", "test_pearson_mean"])
-    assert len(pd.read_csv(results / "summary" / "tpe_test.csv")) == 6
+    for protocol in ("b1b4_es_b5", "b1b5_fixed"):
+        p = summary[summary["protocol"] == protocol]
+        s1 = p[p["subject"] == "S1"].set_index("architecture_id")
+        assert s1.loc["A5", "chosen"] and not s1.loc["A5b", "chosen"] and (s1["n_seeds"] == 3).all()
+        elegida = p[(p["subject"] == "global") & (p["architecture_id"] == "elegida")].iloc[0]
+        assert elegida["test_pearson_mean"] == pytest.approx(s1.loc["A5", "test_pearson_mean"])
+    assert len(pd.read_csv(results / "summary" / "tpe_test.csv")) == 12
+    protocols = pd.read_csv(results / "summary" / "tpe_test_protocols.csv")
+    s1 = protocols[protocols["subject"] == "S1"].set_index("architecture_id")
+    assert (s1["n_pairs"] == 3).all() and np.allclose(s1["delta_mean"], 0.01) and (s1["n_positive"] == 3).all()

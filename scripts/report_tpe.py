@@ -64,9 +64,13 @@ def main() -> int:
     test = _read(summary / "tpe_test_summary.csv")
     if not test.empty:
         print("\nTest oficial (media ± sd de las semillas; en 'global', media y sd entre sujetos):")
-        cols = ["subject", "architecture_id", "chosen", "label", "n_seeds", "test_pearson_mean", "test_pearson_sd",
-                "val_pearson_mean", "verification_cv_best", "mean_best_epoch"]
+        cols = ["protocol", "subject", "architecture_id", "chosen", "label", "n_seeds", "test_pearson_mean",
+                "test_pearson_sd", "val_pearson_mean", "verification_cv_best", "mean_epochs_trained"]
         print(test[cols].round(4).to_string(index=False))
+    protocols = _read(summary / "tpe_test_protocols.csv")
+    if not protocols.empty:
+        print("\nTest con B1–B5 frente a B1–B4 + parada en B5 (Δ apareado por semilla):")
+        print(protocols.round(4).to_string(index=False))
     return 0
 
 

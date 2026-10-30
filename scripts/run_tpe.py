@@ -9,6 +9,7 @@ Ejemplos:
     python scripts/run_tpe.py --subjects S1 S2 S3         # varios sujetos, uno detrás de otro
     python scripts/run_tpe.py --subjects S1 --verify      # finalistas A5b/A5 × 2 semillas × 5 folds (reanudable)
     python scripts/run_tpe.py --subjects S1 --test --test-labels-dir RUTA   # finalistas × 3 semillas en el test oficial
+    python scripts/run_tpe.py --subjects S1 --test-full --test-labels-dir RUTA   # lo mismo entrenando con B1–B5
 """
 
 import os
@@ -44,6 +45,8 @@ def main() -> int:
     parser.add_argument("--verify", action="store_true", help="verificación de finalistas en lugar de búsqueda")
     parser.add_argument("--test", action="store_true",
                         help="evaluación final en el test oficial (requiere la verificación completa del sujeto)")
+    parser.add_argument("--test-full", action="store_true",
+                        help="test oficial entrenando con B1–B5 y épocas fijas (mediana de best_epoch de verificación)")
     parser.add_argument("--test-labels-dir", default=None,
                         help="carpeta con sub{1,2,3}_testlabels.mat (por defecto, la de --data-dir)")
     parser.add_argument("--capacity", action="store_true", help="solo la comprobación de memoria/tiempo en la GPU")
@@ -85,12 +88,13 @@ def main() -> int:
             return 0
         if not subjects:
             parser.error("indica --subjects (o usa --capacity / --smoke)")
-        if args.test:
+        if args.test or args.test_full:
             from ecog_tpe.final_test import run_final_test
 
             labels_dir = Path(args.test_labels_dir) if args.test_labels_dir else data_dir
-            for subject in subjects:
-                run_final_test(cfg, subject, data_dir, labels_dir, results_dir, args.device)
+            for full in [full for full, wanted in ((False, args.test), (True, args.test_full)) if wanted]:
+                for subject in subjects:
+                    run_final_test(cfg, subject, data_dir, labels_dir, results_dir, args.device, full=full)
         elif args.verify:
             from ecog_tpe.verification import run_verification
 

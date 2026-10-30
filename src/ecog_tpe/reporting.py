@@ -234,62 +234,104 @@ def selected_models(trials_df: pd.DataFrame, ver: pd.DataFrame, cfg: dict[str, A
 # ============================================================================ evaluación final en test
 
 
+TEST_PROTOCOLS = {"b1b4_es_b5": "final_test", "b1b5_fixed": "final_test_full"}  # protocolo → carpeta de results/
+PROTOCOL_LABELS = {"b1b4_es_b5": "B1–B4, parada en B5", "b1b5_fixed": "B1–B5, épocas fijas"}
+
+
 def final_test_table(results_dir: str | Path, cfg: dict[str, Any]) -> pd.DataFrame:
-    """``tpe_test.csv``: una fila por sujeto × finalista × semilla (también las pendientes)."""
+    """``tpe_test.csv``: una fila por protocolo × sujeto × finalista × semilla (también las pendientes)."""
     fingers, rows = cfg["data"]["fingers"], []
-    for subject in cfg["data"]["subjects"]:
-        base_dir = Path(results_dir) / "final_test" / subject
-        plan = read_json(base_dir / "plan.json")
-        if not plan:
-            continue
-        for arch, info in plan["finalists"].items():
-            for base in plan["seed_bases"]:
-                run_dir = base_dir / arch / f"seed_{base}"
-                status = read_json(run_dir / "status.json") or {}
-                row = {"subject": subject, "architecture_id": arch, "chosen": arch == plan["chosen"],
-                       "source_trial": info["trial"], "label": info["label"], "seed_base": base,
-                       "seed": status.get("seed"), "state": status.get("status", "pending"),
-                       "verification_cv_best": info["verification_cv_best"]}
-                metrics = read_json(run_dir / "metrics.json") if row["state"] == "completed" else None
-                if metrics:
-                    test = metrics["test"]
-                    row.update({
-                        "best_epoch": metrics["best_epoch"], "epochs_trained": metrics["epochs_trained"],
-                        "stop_reason": metrics["stop_reason"], "val_pearson_macro": metrics["best_val_pearson_macro"],
-                        "test_pearson_macro": test["pearson_macro"],
-                        **{f"test_pearson_{f}": test["pearson"].get(f) for f in fingers},
-                        "test_mse_macro": test.get("mse_macro"), "test_ccc_macro": test.get("ccc_macro"),
-                        "train_seconds": metrics["train_seconds"],
-                    })
-                rows.append(row)
+    for protocol, folder in TEST_PROTOCOLS.items():
+        for subject in cfg["data"]["subjects"]:
+            base_dir = Path(results_dir) / folder / subject
+            plan = read_json(base_dir / "plan.json")
+            if not plan:
+                continue
+            for arch, info in plan["finalists"].items():
+                for base in plan["seed_bases"]:
+                    run_dir = base_dir / arch / f"seed_{base}"
+                    status = read_json(run_dir / "status.json") or {}
+                    row = {"protocol": protocol, "subject": subject, "architecture_id": arch,
+                           "chosen": arch == plan["chosen"], "source_trial": info["trial"], "label": info["label"],
+                           "seed_base": base, "seed": status.get("seed"), "state": status.get("status", "pending"),
+                           "verification_cv_best": info["verification_cv_best"], "epochs_fixed": info.get("epochs")}
+                    metrics = read_json(run_dir / "metrics.json") if row["state"] == "completed" else None
+                    if metrics:
+                        test = metrics["test"]
+                        row.update({
+                            "best_epoch": metrics["best_epoch"], "epochs_trained": metrics["epochs_trained"],
+                            "stop_reason": metrics["stop_reason"],
+                            "val_pearson_macro": metrics["best_val_pearson_macro"],
+                            "test_pearson_macro": test["pearson_macro"],
+                            **{f"test_pearson_{f}": test["pearson"].get(f) for f in fingers},
+                            "test_mse_macro": test.get("mse_macro"), "test_ccc_macro": test.get("ccc_macro"),
+                            "train_seconds": metrics["train_seconds"],
+                        })
+                    rows.append(row)
     return pd.DataFrame(rows)
 
 
+def _global_groups(summary: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    """Grupos de las filas «global»: cada arquitectura y las elegidas (sujetos con igual peso)."""
+    groups = [(arch, summary[summary["architecture_id"] == arch]) for arch in summary["architecture_id"].unique()]
+    groups.append(("elegida", summary[summary["chosen"]]))
+    return [(name, g) for name, g in groups if not g.empty]
+
+
 def final_test_summary(test: pd.DataFrame) -> pd.DataFrame:
-    """``tpe_test_summary.csv``: media y desviación de las semillas por sujeto × finalista; filas globales por
-    arquitectura y para las elegidas (sujetos con igual peso; ahí la desviación es entre sujetos)."""
+    """``tpe_test_summary.csv``: media y desviación de las semillas por protocolo × sujeto × finalista; filas globales
+    por protocolo, arquitectura y para las elegidas (sujetos con igual peso; ahí la desviación es entre sujetos)."""
     done = _completed(test)
     if done.empty:
         return pd.DataFrame()
-    rows = []
-    for (subject, arch), g in done.groupby(["subject", "architecture_id"], sort=False):
-        rows.append({
-            "subject": subject, "architecture_id": arch, "chosen": bool(g["chosen"].iloc[0]),
-            "label": g["label"].iloc[0], "source_trial": int(g["source_trial"].iloc[0]), "n_seeds": len(g),
-            "test_pearson_mean": g["test_pearson_macro"].mean(), "test_pearson_sd": g["test_pearson_macro"].std(ddof=1),
-            "val_pearson_mean": g["val_pearson_macro"].mean(),
-            "verification_cv_best": float(g["verification_cv_best"].iloc[0]),
-            "mean_best_epoch": g["best_epoch"].mean(), "mean_epochs_trained": g["epochs_trained"].mean(),
-        })
+    out = []
+    for protocol, p in done.groupby("protocol", sort=False):
+        rows = []
+        for (subject, arch), g in p.groupby(["subject", "architecture_id"], sort=False):
+            rows.append({
+                "protocol": protocol, "subject": subject, "architecture_id": arch, "chosen": bool(g["chosen"].iloc[0]),
+                "label": g["label"].iloc[0], "source_trial": int(g["source_trial"].iloc[0]), "n_seeds": len(g),
+                "test_pearson_mean": g["test_pearson_macro"].mean(),
+                "test_pearson_sd": g["test_pearson_macro"].std(ddof=1),
+                "val_pearson_mean": g["val_pearson_macro"].mean(),
+                "verification_cv_best": float(g["verification_cv_best"].iloc[0]),
+                "mean_best_epoch": g["best_epoch"].mean(), "mean_epochs_trained": g["epochs_trained"].mean(),
+            })
+        summary = pd.DataFrame(rows)
+        glob = [{"protocol": protocol, "subject": "global", "architecture_id": name, "chosen": name == "elegida",
+                 "n_seeds": int(g["n_seeds"].sum()), "test_pearson_mean": g["test_pearson_mean"].mean(),
+                 "test_pearson_sd": g["test_pearson_mean"].std(ddof=1) if len(g) > 1 else np.nan,
+                 "val_pearson_mean": g["val_pearson_mean"].mean(),
+                 "verification_cv_best": g["verification_cv_best"].mean(),
+                 "mean_best_epoch": g["mean_best_epoch"].mean(), "mean_epochs_trained": g["mean_epochs_trained"].mean()}
+                for name, g in _global_groups(summary)]
+        out += [summary, pd.DataFrame(glob)]
+    return pd.concat(out, ignore_index=True)
+
+
+def final_test_protocols(test: pd.DataFrame) -> pd.DataFrame:
+    """``tpe_test_protocols.csv``: test con B1–B5 frente a B1–B4 + parada en B5, apareado por sujeto, finalista y
+    semilla (la misma semilla da la misma inicialización); filas globales por arquitectura y para las elegidas."""
+    done = _completed(test)
+    if done.empty or done["protocol"].nunique() < len(TEST_PROTOCOLS):
+        return pd.DataFrame()
+    wide = (done.pivot_table(index=["subject", "architecture_id", "chosen", "seed_base"], columns="protocol",
+                             values="test_pearson_macro", sort=False)
+            .reset_index().dropna(subset=list(TEST_PROTOCOLS)))
+    if wide.empty:
+        return pd.DataFrame()
+    es, full = TEST_PROTOCOLS
+    wide["delta"] = wide[full] - wide[es]
+    rows = [{"subject": subject, "architecture_id": arch, "chosen": bool(g["chosen"].iloc[0]), "n_pairs": len(g),
+             f"test_{es}": g[es].mean(), f"test_{full}": g[full].mean(), "delta_mean": g["delta"].mean(),
+             "delta_sd": g["delta"].std(ddof=1) if len(g) > 1 else np.nan, "n_positive": int((g["delta"] > 0).sum())}
+            for (subject, arch), g in wide.groupby(["subject", "architecture_id"], sort=False)]
     summary = pd.DataFrame(rows)
-    groups = [(arch, summary[summary["architecture_id"] == arch]) for arch in summary["architecture_id"].unique()]
-    groups.append(("elegida", summary[summary["chosen"]]))
-    glob = [{"subject": "global", "architecture_id": name, "chosen": name == "elegida", "n_seeds": int(g["n_seeds"].sum()),
-             "test_pearson_mean": g["test_pearson_mean"].mean(),
-             "test_pearson_sd": g["test_pearson_mean"].std(ddof=1) if len(g) > 1 else np.nan,
-             "val_pearson_mean": g["val_pearson_mean"].mean(), "verification_cv_best": g["verification_cv_best"].mean(),
-             "mean_best_epoch": g["mean_best_epoch"].mean(), "mean_epochs_trained": g["mean_epochs_trained"].mean()}
-            for name, g in groups if not g.empty]
+    glob = [{"subject": "global", "architecture_id": name, "chosen": name == "elegida", "n_pairs": int(g["n_pairs"].sum()),
+             f"test_{es}": g[f"test_{es}"].mean(), f"test_{full}": g[f"test_{full}"].mean(),
+             "delta_mean": g["delta_mean"].mean(), "delta_sd": g["delta_mean"].std(ddof=1) if len(g) > 1 else np.nan,
+             "n_positive": int(g["n_positive"].sum())}
+            for name, g in _global_groups(summary)]
     return pd.concat([summary, pd.DataFrame(glob)], ignore_index=True)
 
 
@@ -519,13 +561,17 @@ def plot_reference_curves(reference_dir: str | Path, trials: dict[str, list[Froz
 
 
 def plot_test_scores(test: pd.DataFrame, cfg: dict[str, Any], path: Path) -> Path | None:
-    """Pearson de test por semilla (puntos) y media (línea) de A5b y A5 en cada sujeto; × = media de verificación."""
+    """Pearson de test por semilla (puntos) y media (línea) de A5b y A5 en cada sujeto y protocolo (círculo = B1–B4
+    con parada en B5, rombo = B1–B5 con épocas fijas); × = media de verificación."""
     done = _completed(test)
     if done.empty:
         return None
     subjects = [s for s in cfg["data"]["subjects"] if s in set(done["subject"])]
+    protocols = [p for p in TEST_PROTOCOLS if p in set(done["protocol"])]
+    offsets = dict(zip(protocols, np.linspace(-0.17, 0.17, len(protocols)) if len(protocols) > 1 else [0.0]))
+    markers = {"b1b4_es_b5": "o", "b1b5_fixed": "D"}
     with plt.rc_context(RC):
-        fig, axes = plt.subplots(1, len(subjects), figsize=(3.6 * len(subjects), 3.6), squeeze=False,
+        fig, axes = plt.subplots(1, len(subjects), figsize=(4.4 * len(subjects), 3.6), squeeze=False,
                                  sharey=True, constrained_layout=True)
         for ax, subject in zip(axes[0], subjects):
             ticks, labels, chosen = [], [], None
@@ -533,17 +579,22 @@ def plot_test_scores(test: pd.DataFrame, cfg: dict[str, Any], path: Path) -> Pat
                 v = done[(done["subject"] == subject) & (done["architecture_id"] == arch)]
                 if v.empty:
                     continue
-                values = v["test_pearson_macro"]
-                ax.scatter(np.full(len(values), k) + np.linspace(-0.1, 0.1, len(values)), values, s=22, color=color,
-                           edgecolors=SURFACE, linewidths=0.8, zorder=3, label="test (semilla)" if k == 0 else None)
-                ax.hlines(values.mean(), k - 0.25, k + 0.25, color=color, linewidth=2.0, zorder=4)
-                ax.scatter([k + 0.32], [v["verification_cv_best"].iloc[0]], marker="x", s=30, color=MUTED, zorder=3,
+                for protocol in protocols:  # mismo color por arquitectura; el marcador distingue el protocolo
+                    values = v.loc[v["protocol"] == protocol, "test_pearson_macro"]
+                    if values.empty:
+                        continue
+                    x = k + offsets[protocol]
+                    ax.scatter(np.full(len(values), x) + np.linspace(-0.05, 0.05, len(values)), values, s=20,
+                               marker=markers.get(protocol, "o"), color=color, edgecolors=SURFACE, linewidths=0.8,
+                               zorder=3, label=f"test, {PROTOCOL_LABELS[protocol]}" if k == 0 else None)
+                    ax.hlines(values.mean(), x - 0.1, x + 0.1, color=color, linewidth=2.0, zorder=4)
+                ax.scatter([k + 0.38], [v["verification_cv_best"].iloc[0]], marker="x", s=30, color=MUTED, zorder=3,
                            label="verificación (CV)" if k == 0 else None)
                 if v["chosen"].iloc[0]:
                     chosen = arch
                 ticks.append(k)
                 labels.append(f"{arch}{' ★' if v['chosen'].iloc[0] else ''}\n{v['label'].iloc[0].split(' ', 1)[1]}")
-            ax.set_xticks(ticks, labels)
+            ax.set_xticks(ticks, labels, fontsize=7)
             ax.set_xlim(-0.6, len(ARCH_COLORS) - 0.4)
             ax.grid(axis="x", visible=False)
             ax.set_title(f"{subject} · elegida {chosen}" if chosen else subject)
@@ -554,29 +605,44 @@ def plot_test_scores(test: pd.DataFrame, cfg: dict[str, Any], path: Path) -> Pat
 
 def plot_test_trajectories(results_dir: str | Path, test: pd.DataFrame, cfg: dict[str, Any], path: Path,
                            seconds: float = 30.0) -> Path | None:
-    """Guante real frente a predicho en test: modelo elegido de cada sujeto, primera semilla, primeros segundos."""
+    """Guante real frente a predicho en test: modelo elegido de cada sujeto, primera semilla, primeros segundos; la
+    predicción B1–B5 va en verde discontinuo cuando existe."""
     done = _completed(test)
     done = done[done["chosen"]] if not done.empty else done
     if done.empty:
         return None
     fingers = cfg["data"]["fingers"]
-    runs = [g.sort_values("seed_base").iloc[0] for _, g in done.groupby("subject", sort=False)]
+    runs = []  # (sujeto, arquitectura, etiqueta, semilla, {protocolo: fila})
+    for subject, g in done.groupby("subject", sort=False):
+        base = int(g["seed_base"].min())
+        rows = {r["protocol"]: r for _, r in g[g["seed_base"] == base].iterrows()}
+        first = next(iter(rows.values()))
+        runs.append((subject, first["architecture_id"], first["label"], base, rows))
+    styles = {"b1b4_es_b5": "-", "b1b5_fixed": "--"}
     with plt.rc_context(RC):
         fig, axes = plt.subplots(len(fingers), len(runs), figsize=(5.0 * len(runs), 1.5 * len(fingers)),
                                  squeeze=False, sharex="col", constrained_layout=True)
-        for j, run in enumerate(runs):
-            pred = np.load(Path(results_dir) / "final_test" / run["subject"] / run["architecture_id"]
-                           / f"seed_{run['seed_base']}" / "predictions.npz")
-            t = pred["t_seconds"]
-            keep = t < t[0] + seconds
+        for j, (subject, arch, label_, base, rows) in enumerate(runs):
+            truth_drawn = False
+            for protocol in TEST_PROTOCOLS:
+                if protocol not in rows:
+                    continue
+                pred = np.load(Path(results_dir) / TEST_PROTOCOLS[protocol] / subject / arch / f"seed_{base}"
+                               / "predictions.npz")
+                t = pred["t_seconds"]
+                keep = t < t[0] + seconds
+                for i in range(len(fingers)):
+                    if not truth_drawn:
+                        axes[i, j].plot(t[keep], pred["y_true"][i, keep], color=INK, linewidth=1.2, label="real")
+                    axes[i, j].plot(t[keep], pred["y_pred"][i, keep], linewidth=1.2, linestyle=styles[protocol],
+                                    color=ARCH_COLORS.get(arch, SLOTS[0]) if protocol == "b1b4_es_b5" else SLOTS[2],
+                                    label=f"predicho, {PROTOCOL_LABELS[protocol]}")
+                truth_drawn = True
             for i, finger in enumerate(fingers):
-                ax = axes[i, j]
-                ax.plot(t[keep], pred["y_true"][i, keep], color=INK, linewidth=1.2, label="real")
-                ax.plot(t[keep], pred["y_pred"][i, keep], color=ARCH_COLORS.get(run["architecture_id"], SLOTS[2]),
-                        linewidth=1.2, label="predicho")
-                r = run.get(f"test_pearson_{finger}")
-                ax.set_ylabel(f"{finger}\nr = {r:.2f}" if pd.notna(r) else f"{finger}\nr = —", fontsize=8)
-            axes[0, j].set_title(f"{run['subject']} · {run['label']} · semilla {run['seed_base']}")
+                r = [rows[p].get(f"test_pearson_{finger}") for p in TEST_PROTOCOLS if p in rows]
+                axes[i, j].set_ylabel(f"{finger}\nr = " + " / ".join(f"{v:.2f}" if pd.notna(v) else "—" for v in r),
+                                      fontsize=8)
+            axes[0, j].set_title(f"{subject} · {label_} · semilla {base}")
             axes[-1, j].set_xlabel("tiempo en test (s)")
         axes[0, -1].legend(loc="upper left", bbox_to_anchor=(1.0, 1.0))
         return _save(fig, path)
@@ -606,6 +672,7 @@ def write_summary(results_dir: str | Path, cfg: dict[str, Any], reference_dir: s
         "ablation_retrospective_folds.csv": retro_folds, "tpe_comparison.csv": comparison,
         "tpe_comparison_folds.csv": comparison_folds,
         "tpe_test.csv": test, "tpe_test_summary.csv": final_test_summary(test),
+        "tpe_test_protocols.csv": final_test_protocols(test),
     }
     for name, table in tables.items():
         table.to_csv(out / name, index=False)
@@ -737,25 +804,29 @@ def _print_verification(results_dir: Path, cfg: dict[str, Any], subjects: list[s
 
 def _print_final_test(results_dir: Path, cfg: dict[str, Any], subjects: list[str]) -> None:
     test = final_test_table(results_dir, cfg)
-    for subject in subjects:
-        t = test[test["subject"] == subject] if not test.empty else test
-        if t.empty:
-            print(f"{subject}: test sin empezar")
-            continue
-        done = _completed(t)
-        means = done.groupby("architecture_id")["test_pearson_macro"].mean().to_dict() if not done.empty else {}
-        chosen = t.loc[t["chosen"], "architecture_id"].iloc[0]
-        print(f"{subject}: {len(done)}/{len(t)} corridas · elegida {chosen} · test " +
-              (" · ".join(f"{a} {m:.4f}" for a, m in means.items()) or "—"))
-        for r in t[t["state"] == "running"].itertuples():
-            run_dir = results_dir / "final_test" / subject / r.architecture_id / f"seed_{r.seed_base}"
-            s = read_json(run_dir / "status.json") or {}
-            print(f"  ▶ {r.architecture_id} s{r.seed_base} época {s.get('epoch')}/{s.get('max_epochs')} · "
-                  f"r_val {s.get('last_val_pearson', float('nan')):.4f} · mejor "
-                  f"{s.get('best_val_pearson', float('nan')):.4f} (ép. {s.get('best_epoch')}) · espera {s.get('wait')}")
-            if (run_dir / "history.csv").exists():
-                _plot_live_history(pd.read_csv(run_dir / "history.csv"), f"{subject} test {r.architecture_id} "
-                                                                          f"s{r.seed_base}")
+    for protocol, folder in TEST_PROTOCOLS.items():
+        print(f"— test {PROTOCOL_LABELS[protocol]} —")
+        for subject in subjects:
+            t = test[(test["protocol"] == protocol) & (test["subject"] == subject)] if not test.empty else test
+            if t.empty:
+                print(f"{subject}: sin empezar")
+                continue
+            done = _completed(t)
+            means = done.groupby("architecture_id")["test_pearson_macro"].mean().to_dict() if not done.empty else {}
+            chosen = t.loc[t["chosen"], "architecture_id"].iloc[0]
+            print(f"{subject}: {len(done)}/{len(t)} corridas · elegida {chosen} · test " +
+                  (" · ".join(f"{a} {m:.4f}" for a, m in means.items()) or "—"))
+            for r in t[t["state"] == "running"].itertuples():
+                run_dir = results_dir / folder / subject / r.architecture_id / f"seed_{r.seed_base}"
+                s = read_json(run_dir / "status.json") or {}
+                line = f"  ▶ {r.architecture_id} s{r.seed_base} época {s.get('epoch')}/{s.get('max_epochs')}"
+                if "best_val_pearson" in s:
+                    line += (f" · r_val {s.get('last_val_pearson', float('nan')):.4f} · mejor "
+                             f"{s['best_val_pearson']:.4f} (ép. {s.get('best_epoch')}) · espera {s.get('wait')}")
+                print(line)
+                if (run_dir / "history.csv").exists():
+                    _plot_live_history(pd.read_csv(run_dir / "history.csv"),
+                                       f"{subject} test {PROTOCOL_LABELS[protocol]} {r.architecture_id} s{r.seed_base}")
 
 
 def _latest_log(results_dir: Path) -> Path | None:
@@ -764,6 +835,15 @@ def _latest_log(results_dir: Path) -> Path | None:
 
 
 def _plot_live_history(history: pd.DataFrame, title: str) -> None:
+    if "val_pearson_macro" not in history:  # épocas fijas (test con B1–B5): solo hay pérdida de train
+        with plt.rc_context(RC):
+            fig, ax = plt.subplots(figsize=(4.5, 2.6), constrained_layout=True)
+            ax.plot(history["epoch"], history["train_loss"], color=SLOTS[0])
+            ax.set_title("pérdida de train")
+            ax.set_xlabel("época")
+            fig.suptitle(title, fontsize=10)
+            plt.show()
+        return
     with plt.rc_context(RC):
         fig, axes = plt.subplots(1, 2, figsize=(9, 2.6), constrained_layout=True)
         axes[0].plot(history["epoch"], history["train_loss"], color=SLOTS[0], label="train")

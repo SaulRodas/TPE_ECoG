@@ -1,7 +1,8 @@
 """Entrenamiento común: Adam con L2 acoplada, pérdida 0.5·MSE + 0.5·(1 − coseno), semillas, determinismo y
 early stopping con el mejor checkpoint de validación (plan §4).
 
-Todo salvo ``EarlyStopping``, ``simulate`` y ``train_fold`` es copia de ecog_ablations (commit 043c44f).
+Todo salvo ``EarlyStopping``, ``simulate``, ``train_fold`` y ``train_fixed_epochs`` es copia de ecog_ablations
+(commit 043c44f).
 """
 
 from __future__ import annotations
@@ -236,3 +237,51 @@ def train_fold(
     restored = float(np.mean(pearson_per_channel(y_val, y_best)[0]))
     return FoldResult(history, y_best, stopper.best_epoch, stopper.best_score, restored, len(history), reason,
                       train_seconds)
+
+
+def train_fixed_epochs(
+    model: torch.nn.Module,
+    feats: FoldFeatures,
+    tcfg: dict[str, Any],
+    epochs: int,
+    device: torch.device,
+    seed: int,
+    on_epoch: Callable[[dict[str, Any]], None] | None = None,
+    max_batches: int | None = None,
+) -> tuple[list[dict[str, Any]], float]:
+    """Entrena ``epochs`` épocas sin validación ni checkpoints (todos los bloques de ``feats`` entrenan); el modelo
+    queda con los pesos de la última época. Mismo bucle de lotes que ``train_fold``. Devuelve historia y segundos."""
+    lcfg, batch = tcfg["loss"], tcfg["batch_size"]
+    windows = _Windows(feats, device)
+    train_index = torch.from_numpy(feats.train_index).to(device)
+    n_train = len(train_index)
+    n_batches = n_train // batch if tcfg["drop_last"] else -(-n_train // batch)
+    if max_batches is not None:
+        n_batches = min(n_batches, max_batches)
+
+    optimizer = make_optimizer(model, tcfg)
+    order = torch.Generator().manual_seed(seed)
+    history = []
+    t_start = time.perf_counter()
+    model.train()
+    for epoch in range(1, epochs + 1):
+        t0 = time.perf_counter()
+        perm = torch.randperm(n_train, generator=order).to(device)
+        sums = torch.zeros(3, device=device, dtype=torch.float64)
+        for i in range(n_batches):
+            sel = train_index[perm[i * batch:(i + 1) * batch]]
+            xb, yb = windows.get(sel[:, 0], sel[:, 1])
+            loss, mse, cos = mse_cosine_loss(model(xb), yb, lcfg)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            sums += torch.stack([loss.detach(), mse.detach(), cos.detach()]).double()
+        train_loss, train_mse, train_cos = (sums / max(n_batches, 1)).tolist()
+        row = {"epoch": epoch, "train_loss": train_loss, "train_mse": train_mse, "train_cos": train_cos,
+               "n_batches": n_batches, "epoch_seconds": time.perf_counter() - t0}
+        history.append(row)
+        if on_epoch is not None:
+            on_epoch(row)
+        if not np.isfinite(train_loss):
+            raise FloatingPointError(f"pérdida de entrenamiento no finita en la época {epoch}")
+    return history, time.perf_counter() - t_start

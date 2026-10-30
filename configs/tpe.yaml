@@ -125,3 +125,5 @@ final_test:                         # evaluación final: los dos finalistas por 
   max_epochs: 70                    # solo aquí; búsqueda y verificación siguen con 50
   seed_bases: [3042, 4042, 5042]    # semilla = base + 5·sujeto + índice del fold de validación
 # Estos modelos sí guardan sus pesos (model.pt del mejor checkpoint) y el preprocesamiento para reutilizarlos.
+# El test con B1–B5 (--test-full, results/final_test_full/) usa las mismas semillas y, sin bloque de parada, épocas
+# fijas por finalista = mediana de sus best_epoch de verificación (plan §7.1); guarda los pesos de la última época.
