@@ -736,10 +736,11 @@ def search_progress(results_dir: str | Path, cfg: dict[str, Any], subjects: list
 
 def monitor(results_dir: str | Path, cfg: dict[str, Any], subjects: list[str] | None = None, refresh: int = 60,
             log_path: str | Path | None = None, max_updates: int | None = None, verification: bool = False,
-            final_test: bool = False) -> None:
+            final_test: bool = False, protocols: list[str] | None = None) -> None:
     """Panel reejecutable: progreso, ETA, trial y fold en curso, mejores valores y cola del log.
 
-    Detenerlo no detiene el entrenamiento.
+    Con ``final_test``, ``protocols`` limita el panel a esos protocolos de test (por defecto, todos). Detenerlo no
+    detiene el entrenamiento.
     """
     from IPython.display import clear_output
 
@@ -756,7 +757,7 @@ def monitor(results_dir: str | Path, cfg: dict[str, Any], subjects: list[str] | 
                 print(f"runner {runner.stem}: último latido hace {age:.0f} s · {info.get('current')}"
                       if age is not None else f"runner {runner.stem}")
             if final_test:
-                _print_final_test(results_dir, cfg, subjects)
+                _print_final_test(results_dir, cfg, subjects, protocols)
             elif verification:
                 _print_verification(results_dir, cfg, subjects)
             else:
@@ -802,9 +803,12 @@ def _print_verification(results_dir: Path, cfg: dict[str, Any], subjects: list[s
                                           for r in v[v["state"] == "running"].itertuples()))
 
 
-def _print_final_test(results_dir: Path, cfg: dict[str, Any], subjects: list[str]) -> None:
+def _print_final_test(results_dir: Path, cfg: dict[str, Any], subjects: list[str],
+                      protocols: list[str] | None = None) -> None:
     test = final_test_table(results_dir, cfg)
     for protocol, folder in TEST_PROTOCOLS.items():
+        if protocols is not None and protocol not in protocols:
+            continue
         print(f"— test {PROTOCOL_LABELS[protocol]} —")
         for subject in subjects:
             t = test[(test["protocol"] == protocol) & (test["subject"] == subject)] if not test.empty else test
