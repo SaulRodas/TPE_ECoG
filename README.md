@@ -1,4 +1,4 @@
-# TPE conjunto A5b/A5 — ECoG BCI IV-4
+# TPE conjunto A5b/A5 — ECoG BCI IV-4.
 
 ¿Cuánto mejora el Pearson macro de A5b y A5 al optimizar conjuntamente arquitectura (`kernel_size`, `encoder_levels`, `base_filters`), tasa de aprendizaje y L2 con **Optuna TPE**? Cada entrenamiento usa **early stopping con el mejor checkpoint** de validación.
 
